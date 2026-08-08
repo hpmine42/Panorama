@@ -70,6 +70,17 @@ npm run preview
 
 Der Build liegt in `dist/`. Der Ordner wird nicht in Git eingecheckt.
 
+## Schwarzer Bildschirm / Troubleshooting
+
+Wenn die App nur schwarz erscheint, prüfe zuerst, **wie GitHub Pages veröffentlicht**:
+
+- Nicht **Deploy from a branch → root** mit dem Quellverzeichnis verwenden. Die dort liegende `index.html` referenziert `src/main.tsx`; diese TSX-Datei ist noch kein ausführbares Browser-JavaScript.
+- GitHub Pages muss über den Build-Workflow oder einen vorherigen `npm run build` mit dem fertigen `dist/`-Ordner veröffentlicht werden.
+- Nach Änderungen an Manifest oder Service Worker einmal hart neu laden. Bei einer bereits installierten PWA kann unter Chrome → Website-Einstellungen → Speicher/Service Worker der alte Website-Speicher gelöscht werden.
+- Lokal zuerst `npm run dev` verwenden; alternativ nach `npm run build` mit `npm run preview` testen.
+
+Die Anwendung enthält zusätzlich einen sichtbaren Ladebildschirm und eine Runtime-Fehleranzeige, damit fehlende JavaScript- oder WebGL-Unterstützung nicht mehr als völlig leere Seite erscheint.
+
 ## Deployment
 
 ### GitHub Pages über GitHub Actions
