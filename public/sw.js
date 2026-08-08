@@ -1,5 +1,5 @@
 /* Panorama Viewer service worker. Kept as plain JS so Vite can copy it without a plugin. */
-const CACHE_NAME = 'panorama-viewer-shell-v1';
+const CACHE_NAME = 'panorama-viewer-shell-v2';
 const DATABASE_NAME = 'panorama-viewer';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'incoming-shares';

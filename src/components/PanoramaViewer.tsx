@@ -338,6 +338,14 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
       onDragStart={(event) => event.preventDefault()}
     >
       <BackgroundRenderer ref={backgroundRef} asset={asset} />
+      {rendererError && (
+        <img
+          className="viewer-image-fallback"
+          src={asset.url}
+          alt={asset.name}
+          draggable={false}
+        />
+      )}
       <canvas ref={canvasRef} className="viewer-canvas" aria-label="Interaktives Foto" />
       <div className="viewer-vignette" aria-hidden="true" />
       <ViewerControls
