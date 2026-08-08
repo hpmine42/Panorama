@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# Vite / TypeScript output
+dist/
+.vite/
+*.tsbuildinfo
+
+# local environment files
+.env
+.env.*
+!.env.example
+
+# editor / OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# test and coverage output
+coverage/
+playwright-report/
+
+# local scratch files
+*.log
