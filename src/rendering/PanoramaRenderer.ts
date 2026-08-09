@@ -22,6 +22,7 @@ const PANORAMA_FRAGMENT_SHADER = `
   uniform float uYaw;
   uniform float uPitch;
   uniform float uFrameScale;
+  uniform float uCurvature;
 
   const float PI = 3.141592653589793;
 
@@ -52,11 +53,26 @@ const PANORAMA_FRAGMENT_SHADER = `
     }
     float aspect = uResolution.x / max(uResolution.y, 1.0);
     float halfFov = tan(uFov * 0.5);
-    vec3 ray = normalize(vec3(
+    vec3 rectilinearRay = normalize(vec3(
       normalized.x * aspect * halfFov,
       normalized.y * halfFov,
       -1.0
     ));
+
+    // While zoomed out, use an equidistant fisheye ray. It makes the edges
+    // bend towards the centre like the inside of a sphere instead of merely
+    // shrinking a flat panorama. The projection blends continuously back to
+    // a normal rectilinear camera as the user zooms in.
+    float lensRadius = length(normalized);
+    float lensAngle = lensRadius * uFov * 0.5;
+    vec3 lensDirection = lensRadius > 0.0001
+      ? normalize(vec3(normalized.x * aspect, normalized.y, 0.0))
+      : vec3(0.0, 0.0, 0.0);
+    vec3 fisheyeRay = vec3(
+      lensDirection.xy * sin(lensAngle),
+      -cos(lensAngle)
+    );
+    vec3 ray = normalize(mix(rectilinearRay, fisheyeRay, uCurvature));
 
     ray = rotateX(ray, uPitch);
     ray = rotateY(ray, uYaw);
@@ -64,10 +80,9 @@ const PANORAMA_FRAGMENT_SHADER = `
     float longitude = atan(ray.x, -ray.z);
     float latitude = asin(clamp(ray.y, -1.0, 1.0));
     float panoramaU = fract(0.5 + longitude / (2.0 * PI));
-    float panoramaV = 0.5 - latitude / PI;
-
-    // The texture is uploaded with UNPACK_FLIP_Y_WEBGL, so texture V=0 is
-    // the top of the original image. panoramaV is already top-origin.
+    // Correct the vertical texture lookup: WebGL's V axis is the inverse of
+    // the image/canvas axis. This keeps sky at the top and ground at bottom.
+    float panoramaV = 0.5 + latitude / PI;
     gl_FragColor = texture2D(uTexture, vec2(panoramaU, panoramaV));
   }
 `;
@@ -87,8 +102,9 @@ const IMAGE_FRAGMENT_SHADER = `
       discard;
     }
 
-    // UNPACK_FLIP_Y_WEBGL makes V=0 correspond to the top of the source.
-    gl_FragColor = texture2D(uTexture, imageUv);
+    // Convert canvas Y (top-origin) back to WebGL texture Y. This avoids
+    // rendering ordinary photos upside down alongside the panorama view.
+    gl_FragColor = texture2D(uTexture, vec2(imageUv.x, 1.0 - imageUv.y));
   }
 `;
 
@@ -100,6 +116,7 @@ type ProgramUniforms = {
   yaw?: WebGLUniformLocation | null;
   pitch?: WebGLUniformLocation | null;
   frameScale?: WebGLUniformLocation | null;
+  curvature?: WebGLUniformLocation | null;
   displaySize?: WebGLUniformLocation | null;
   offset?: WebGLUniformLocation | null;
 };
@@ -122,7 +139,7 @@ function compileShader(gl: WebGLRenderingContext, type: number, source: string):
 function createProgram(
   gl: WebGLRenderingContext,
   fragmentSource: string,
-  uniformNames: Array<'resolution' | 'fov' | 'yaw' | 'pitch' | 'frameScale' | 'displaySize' | 'offset'>,
+  uniformNames: Array<'resolution' | 'fov' | 'yaw' | 'pitch' | 'frameScale' | 'curvature' | 'displaySize' | 'offset'>,
 ): { program: WebGLProgram; uniforms: ProgramUniforms } {
   const vertexShader = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
   const fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -210,6 +227,7 @@ export class PanoramaRenderer {
       'yaw',
       'pitch',
       'frameScale',
+      'curvature',
     ]);
     this.image = createProgram(context, IMAGE_FRAGMENT_SHADER, ['displaySize', 'offset']);
 
@@ -311,7 +329,10 @@ export class PanoramaRenderer {
       gl.uniform1f(uniforms.fov ?? null, fov);
       gl.uniform1f(uniforms.yaw ?? null, view.yaw);
       gl.uniform1f(uniforms.pitch ?? null, view.pitch);
-      gl.uniform1f(uniforms.frameScale ?? null, Math.min(1, Math.max(0.58, view.zoom)));
+      // Keep the entire viewport active when zooming out; the camera changes
+      // its lens rather than turning into a smaller, flat rectangle.
+      gl.uniform1f(uniforms.frameScale ?? null, 1);
+      gl.uniform1f(uniforms.curvature ?? null, Math.min(1, Math.max(0, (1.08 - view.zoom) / 0.43)));
     } else {
       const imageAspect = this.textureWidth / Math.max(this.textureHeight, 1);
       const viewportAspect = this.viewport.width / Math.max(this.viewport.height, 1);
