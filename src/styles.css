@@ -16,7 +16,9 @@ body,
 #root {
   width: 100%;
   height: 100%;
+  height: 100dvh;
   margin: 0;
+  padding: 0;
   overflow: hidden;
   overscroll-behavior: none;
 }
@@ -44,6 +46,9 @@ input {
 
 button {
   color: inherit;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 button:focus-visible {
@@ -52,10 +57,10 @@ button:focus-visible {
 }
 
 .app-shell {
-  position: relative;
+  position: fixed;
+  inset: 0;
   width: 100%;
   height: 100%;
-  min-height: 100dvh;
   overflow: hidden;
   background:
     radial-gradient(circle at 25% 15%, rgba(66, 114, 136, 0.22), transparent 32%),
@@ -63,11 +68,32 @@ button:focus-visible {
     #080c12;
 }
 
+.home-scroll {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  padding:
+    calc(20px + env(safe-area-inset-top, 0px))
+    calc(22px + env(safe-area-inset-right, 0px))
+    calc(18px + env(safe-area-inset-bottom, 0px))
+    calc(22px + env(safe-area-inset-left, 0px));
+}
+
 .app-crash {
   width: min(100% - 44px, 430px);
-  min-height: 100%;
+  height: 100%;
   margin: 0 auto;
-  padding: calc(30px + env(safe-area-inset-top)) 0 calc(84px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  padding:
+    calc(30px + env(safe-area-inset-top, 0px))
+    env(safe-area-inset-right, 0px)
+    calc(40px + env(safe-area-inset-bottom, 0px))
+    env(safe-area-inset-left, 0px);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -85,10 +111,9 @@ button:focus-visible {
 }
 
 .empty-state {
-  width: min(100% - 44px, 430px);
-  min-height: 100%;
-  margin: 0 auto;
-  padding: calc(30px + env(safe-area-inset-top)) 0 calc(84px + env(safe-area-inset-bottom));
+  width: min(100%, 430px);
+  margin: auto;
+  padding: 14px 0 22px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -100,7 +125,7 @@ button:focus-visible {
   height: 68px;
   display: grid;
   place-items: center;
-  margin-bottom: 30px;
+  margin-bottom: 28px;
   border: 1px solid rgba(197, 230, 241, 0.22);
   border-radius: 22px;
   color: #b9e6ef;
@@ -119,7 +144,7 @@ button:focus-visible {
 .empty-state h1 {
   margin: 0;
   color: #f8fbff;
-  font-size: clamp(2.7rem, 13vw, 4.7rem);
+  font-size: clamp(2.5rem, 12.5vw, 4.7rem);
   font-weight: 650;
   letter-spacing: -0.075em;
   line-height: 0.96;
@@ -131,7 +156,7 @@ button:focus-visible {
 
 .empty-state__copy {
   max-width: 360px;
-  margin: 25px 0 30px;
+  margin: 22px 0 28px;
   color: #a3b1be;
   font-size: 0.98rem;
   line-height: 1.58;
@@ -152,10 +177,6 @@ button:focus-visible {
   font-size: 0.94rem;
   font-weight: 750;
   transition: transform 160ms ease, filter 160ms ease;
-}
-
-.primary-button:hover {
-  filter: brightness(1.06);
 }
 
 .primary-button:active {
@@ -187,14 +208,12 @@ button:focus-visible {
 }
 
 .app-footer {
-  position: absolute;
-  right: 22px;
-  bottom: calc(20px + env(safe-area-inset-bottom));
-  left: 22px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
+  padding-top: 8px;
   color: #748491;
   font-size: 0.72rem;
 }
@@ -212,9 +231,10 @@ button:focus-visible {
   -webkit-touch-callout: none;
 }
 
-.viewer-stage:fullscreen {
-  width: 100vw;
-  height: 100vh;
+.viewer-stage:fullscreen,
+.viewer-stage:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
   background: #080c12;
 }
 
@@ -233,17 +253,20 @@ button:focus-visible {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transform: translate3d(var(--background-shift-x, 0px), var(--background-shift-y, 0px), 0) scale(var(--background-scale, 1.08));
+  transform: translate3d(0, 0, 0) scale(1.12);
   transform-origin: center;
-  filter: blur(30px) saturate(1.16) brightness(var(--background-brightness, 0.62));
+  filter: blur(22px) saturate(1.16);
   opacity: 0.98;
-  will-change: transform, filter;
+  will-change: transform;
 }
 
 .viewer-background__shade {
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse at center, rgba(6, 10, 15, 0.05), rgba(4, 8, 13, 0.43));
+  background: radial-gradient(ellipse at center, rgba(6, 10, 15, 0.22), rgba(4, 8, 13, 0.62));
+  opacity: 0.88;
+  transition: opacity 180ms ease;
+  will-change: opacity;
 }
 
 .viewer-image-fallback {
@@ -277,7 +300,12 @@ button:focus-visible {
   z-index: 3;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(180deg, rgba(3, 8, 13, 0.35), transparent 22%, transparent 74%, rgba(3, 8, 13, 0.48));
+  background: linear-gradient(180deg, rgba(3, 8, 13, 0.36), transparent 22%, transparent 74%, rgba(3, 8, 13, 0.5));
+  transition: opacity 200ms ease;
+}
+
+.viewer-vignette--hidden {
+  opacity: 0;
 }
 
 .viewer-controls {
@@ -287,8 +315,17 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: calc(12px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom));
+  padding:
+    calc(12px + env(safe-area-inset-top, 0px))
+    calc(14px + env(safe-area-inset-right, 0px))
+    calc(14px + env(safe-area-inset-bottom, 0px))
+    calc(14px + env(safe-area-inset-left, 0px));
   pointer-events: none;
+  transition: opacity 200ms ease;
+}
+
+.viewer-controls--hidden {
+  opacity: 0;
 }
 
 .viewer-topbar,
@@ -303,9 +340,15 @@ button:focus-visible {
   min-width: 0;
 }
 
-.viewer-topbar > *,
+.viewer-topbar > button,
 .viewer-bottombar > * {
   pointer-events: auto;
+}
+
+.viewer-controls--hidden button,
+.viewer-controls--hidden .zoom-controls,
+.viewer-controls--hidden .viewer-actions {
+  pointer-events: none !important;
 }
 
 .viewer-title {
@@ -313,9 +356,10 @@ button:focus-visible {
   display: flex;
   flex: 1;
   flex-direction: column;
-  padding: 0 5px;
+  padding: 0 4px;
   overflow: hidden;
-  text-shadow: 0 1px 9px rgba(0, 0, 0, 0.48);
+  pointer-events: none;
+  text-shadow: 0 1px 9px rgba(0, 0, 0, 0.52);
 }
 
 .viewer-title strong,
@@ -333,14 +377,14 @@ button:focus-visible {
 
 .viewer-title span {
   margin-top: 3px;
-  color: rgba(232, 243, 247, 0.68);
+  color: rgba(232, 243, 247, 0.72);
   font-size: 0.67rem;
 }
 
 .glass {
   border-color: rgba(255, 255, 255, 0.16) !important;
-  background: rgba(10, 18, 26, 0.48) !important;
-  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255, 255, 255, 0.1) !important;
+  background: rgba(10, 18, 26, 0.52) !important;
+  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.18), inset 0 1px rgba(255, 255, 255, 0.1) !important;
   -webkit-backdrop-filter: blur(18px) saturate(1.25);
   backdrop-filter: blur(18px) saturate(1.25);
 }
@@ -357,19 +401,23 @@ button:focus-visible {
   color: rgba(247, 252, 255, 0.92);
   background: transparent;
   cursor: pointer;
-  transition: background 150ms ease, transform 150ms ease, border-color 150ms ease;
+  transition: background 150ms ease, transform 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
-.icon-button:hover {
-  background: rgba(255, 255, 255, 0.1);
+.icon-button:active,
+.mode-button:active {
+  transform: scale(0.91);
 }
 
-.icon-button:active {
-  transform: scale(0.9);
+.icon-button.is-active {
+  color: #b7e9ed;
+  border-color: rgba(183, 233, 237, 0.42) !important;
+  background: rgba(22, 50, 62, 0.68) !important;
 }
 
 .viewer-bottombar {
   justify-content: space-between;
+  gap: 8px;
 }
 
 .zoom-controls {
@@ -380,10 +428,33 @@ button:focus-visible {
   border-radius: 17px;
 }
 
+.viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-button {
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 15px;
+  color: rgba(247, 252, 255, 0.94);
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition: background 150ms ease, transform 150ms ease, border-color 150ms ease;
+}
+
 .loading-pill {
   position: absolute;
   z-index: 8;
-  top: calc(70px + env(safe-area-inset-top));
+  top: calc(70px + env(safe-area-inset-top, 0px));
   left: 50%;
   display: flex;
   align-items: center;
@@ -448,9 +519,63 @@ button:focus-visible {
   to { transform: rotate(360deg); }
 }
 
-@media (min-width: 700px) {
+@media (hover: hover) and (pointer: fine) {
+  .primary-button:hover {
+    filter: brightness(1.06);
+  }
+
+  .icon-button:hover,
+  .mode-button:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+}
+
+@media (max-height: 520px) and (orientation: landscape) {
+  .home-scroll {
+    padding-top: calc(12px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+
   .empty-state {
-    width: min(100% - 80px, 510px);
+    width: min(100%, 540px);
+    padding: 4px 0 8px;
+  }
+
+  .empty-state__mark {
+    width: 46px;
+    height: 46px;
+    margin-bottom: 12px;
+    border-radius: 15px;
+  }
+
+  .eyebrow {
+    margin-bottom: 6px;
+  }
+
+  .empty-state h1 {
+    font-size: clamp(1.9rem, 5.5vw, 2.6rem);
+  }
+
+  .empty-state__copy {
+    max-width: 460px;
+    margin: 10px 0 14px;
+    font-size: 0.88rem;
+    line-height: 1.42;
+  }
+
+  .primary-button {
+    min-height: 44px;
+    font-size: 0.88rem;
+  }
+
+  .empty-state__hint {
+    margin-top: 10px;
+  }
+}
+
+@media (min-width: 700px) and (min-height: 521px) {
+  .empty-state {
+    width: min(100%, 510px);
   }
 
   .empty-state h1 {
@@ -458,8 +583,8 @@ button:focus-visible {
   }
 
   .viewer-controls {
-    padding-right: 22px;
-    padding-left: 22px;
+    padding-right: calc(22px + env(safe-area-inset-right, 0px));
+    padding-left: calc(22px + env(safe-area-inset-left, 0px));
   }
 }
 

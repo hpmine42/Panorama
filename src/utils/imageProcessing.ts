@@ -1,18 +1,19 @@
 import type { ImageAsset, ViewerMode } from '../types';
+import { readGPanoMetadata, resolveImageClassification } from './panoramaMetadata';
 
-const PANORAMA_ASPECT_RATIO = 1.75;
-const SUPPORTED_EXTENSIONS = /\.(jpe?g|png|webp|heic|heif)$/i;
+const SUPPORTED_EXTENSIONS = /\.(jpe?g|png|webp|heic|heif|avif|gif|bmp)$/i;
+const BACKGROUND_THUMB_MAX_EDGE = 72;
 
 export function isSupportedImage(file: File): boolean {
   return file.type.startsWith('image/') || SUPPORTED_EXTENSIONS.test(file.name);
 }
 
 export function detectViewerMode(width: number, height: number): ViewerMode {
-  return width / Math.max(height, 1) >= PANORAMA_ASPECT_RATIO ? 'panorama' : 'image';
+  return resolveImageClassification(width, height, null).mode;
 }
 
 function makeId(): string {
-  if ('randomUUID' in crypto) {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -39,10 +40,53 @@ function waitForImage(image: HTMLImageElement, url: string): Promise<void> {
   });
 }
 
+export async function decodeImageFromUrl(url: string): Promise<HTMLImageElement> {
+  const image = new Image();
+  image.decoding = 'async';
+  image.draggable = false;
+  image.alt = '';
+  await waitForImage(image, url);
+  if (typeof image.decode === 'function') {
+    await image.decode().catch(() => undefined);
+  }
+  return image;
+}
+
+function createBackgroundThumbnail(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+  fallbackUrl: string,
+): string {
+  try {
+    const scale = Math.min(1, BACKGROUND_THUMB_MAX_EDGE / Math.max(width, height, 1));
+    const thumbWidth = Math.max(8, Math.round(width * scale));
+    const thumbHeight = Math.max(8, Math.round(height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = thumbWidth;
+    canvas.height = thumbHeight;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) {
+      canvas.width = 0;
+      canvas.height = 0;
+      return fallbackUrl;
+    }
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'medium';
+    context.drawImage(image, 0, 0, thumbWidth, thumbHeight);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+    canvas.width = 0;
+    canvas.height = 0;
+    return dataUrl.startsWith('data:image/') ? dataUrl : fallbackUrl;
+  } catch {
+    return fallbackUrl;
+  }
+}
+
 /**
- * Decodes a local file without uploading it anywhere. Keeping an HTMLImageElement
- * here lets WebGL resize the source before it reaches the GPU, which avoids a
- * second full-size ImageBitmap allocation on memory-constrained phones.
+ * Decodes a local file without uploading it anywhere. Reads optional GPano XMP
+ * metadata in parallel and generates a tiny backdrop thumbnail so mobile GPUs
+ * do not keep a second full-resolution bitmap in RAM for the blurred background.
  */
 export async function loadImageAsset(file: File): Promise<ImageAsset> {
   if (!isSupportedImage(file)) {
@@ -50,33 +94,33 @@ export async function loadImageAsset(file: File): Promise<ImageAsset> {
   }
 
   const url = URL.createObjectURL(file);
-  const image = new Image();
-  image.decoding = 'async';
-  image.draggable = false;
-  image.alt = '';
 
   try {
-    await waitForImage(image, url);
-    // decode() is already implied by load in most browsers. Calling it when
-    // available prevents a race between the load event and texImage2D.
-    if (typeof image.decode === 'function') {
-      await image.decode().catch(() => undefined);
-    }
+    const [image, gpano] = await Promise.all([
+      decodeImageFromUrl(url),
+      readGPanoMetadata(file),
+    ]);
 
     const width = image.naturalWidth;
     const height = image.naturalHeight;
     if (!width || !height) {
+      image.src = '';
       throw new Error('Das Bild hat keine lesbare Größe.');
     }
+
+    const { mode, coverage } = resolveImageClassification(width, height, gpano);
+    const backgroundUrl = createBackgroundThumbnail(image, width, height, url);
 
     return {
       id: makeId(),
       file,
       url,
+      backgroundUrl,
       source: image,
       width,
       height,
-      mode: detectViewerMode(width, height),
+      mode,
+      coverage,
       name: file.name || 'Panorama',
       type: file.type || 'image/*',
     };
@@ -88,11 +132,17 @@ export async function loadImageAsset(file: File): Promise<ImageAsset> {
   }
 }
 
+/** Releases the CPU-decoded HTMLImageElement once the GPU texture is uploaded. */
+export function releaseImageSource(asset: ImageAsset): void {
+  if (asset.source) {
+    asset.source.src = '';
+    asset.source = null;
+  }
+}
+
 export function disposeImageAsset(asset: ImageAsset): void {
+  releaseImageSource(asset);
   URL.revokeObjectURL(asset.url);
-  // Release the browser-side decoded image as soon as a different photo is
-  // selected. The GPU texture is released by PanoramaRenderer.disposeImage().
-  asset.source.src = '';
 }
 
 export function formatImageDimensions(width: number, height: number): string {

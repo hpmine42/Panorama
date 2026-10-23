@@ -27,7 +27,9 @@ export const ImagePicker = forwardRef<ImagePickerHandle, ImagePickerProps>(
         ref={inputRef}
         className="visually-hidden"
         type="file"
-        accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+        // Pure image/* invokes the native Android Photo Picker / iOS Photos library
+        // instead of falling back to the raw SAF document browser on Android Chrome.
+        accept="image/*"
         disabled={disabled}
         onChange={(event) => {
           const file = event.currentTarget.files?.[0];
