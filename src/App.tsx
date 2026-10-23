@@ -64,6 +64,11 @@ export function App() {
   }, [clearAsset]);
 
   useEffect(() => {
+    // Clear any stale #viewer hash left over from a page reload before an image is chosen.
+    if (!assetRef.current && window.location.hash === '#viewer') {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    }
+
     const handlePopState = () => {
       if (viewerHistoryRef.current) {
         viewerHistoryRef.current = false;
@@ -130,7 +135,7 @@ export function App() {
           onOpenAnother={() => pickerRef.current?.open()}
         />
       ) : (
-        <>
+        <div className="home-scroll">
           <EmptyState
             onOpen={() => pickerRef.current?.open()}
             isLoading={isLoading}
@@ -140,7 +145,7 @@ export function App() {
             <Icon name="image" size={14} />
             <span>Lokal auf deinem Gerät · keine Uploads</span>
           </footer>
-        </>
+        </div>
       )}
       {isLoading && asset && (
         <div className="loading-pill" role="status">

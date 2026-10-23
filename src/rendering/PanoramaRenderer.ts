@@ -1,7 +1,10 @@
-import type { ImageAsset, ViewState, ViewportSize } from '../types';
+import type { ImageAsset, PanoramaCoverage, ViewerMode, ViewState, ViewportSize } from '../types';
+import { decodeImageFromUrl, releaseImageSource } from '../utils/imageProcessing';
+import { computeCameraParams, getNormalDisplaySize } from './panoramaMath';
 
-const PI = Math.PI;
-const MAX_MOBILE_TEXTURE_DIMENSION = 4096;
+const MAX_MOBILE_TEXTURE_DIMENSION = 8192;
+const HIGH_MEMORY_MAX_TEXELS = 33_554_432;
+const LOW_MEMORY_MAX_TEXELS = 16_777_216;
 
 const VERTEX_SHADER = `
   attribute vec2 aPosition;
@@ -13,16 +16,28 @@ const VERTEX_SHADER = `
   }
 `;
 
-const PANORAMA_FRAGMENT_SHADER = `
+const PRECISION_HEADER = `
+  #ifdef GL_FRAGMENT_PRECISION_HIGH
   precision highp float;
+  #else
+  precision mediump float;
+  #endif
+`;
+
+const PANORAMA_FRAGMENT_SHADER = `
+  ${PRECISION_HEADER}
   varying vec2 vUv;
   uniform sampler2D uTexture;
   uniform vec2 uResolution;
-  uniform float uFov;
+  uniform float uVFov;
+  uniform float uVHalfTan;
   uniform float uYaw;
   uniform float uPitch;
-  uniform float uFrameScale;
   uniform float uCurvature;
+  uniform float uHSpan;
+  uniform float uVSpan;
+  uniform float uPitchCenter;
+  uniform float uWrapH;
 
   const float PI = 3.141592653589793;
 
@@ -47,29 +62,25 @@ const PANORAMA_FRAGMENT_SHADER = `
   }
 
   void main() {
-    vec2 normalized = (vUv * 2.0 - 1.0) / max(uFrameScale, 0.001);
-    if (abs(normalized.x) > 1.0 || abs(normalized.y) > 1.0) {
-      discard;
-    }
+    vec2 normalized = vUv * 2.0 - 1.0;
     float aspect = uResolution.x / max(uResolution.y, 1.0);
-    float halfFov = tan(uFov * 0.5);
+    vec2 screenPos = vec2(normalized.x * aspect, normalized.y);
+
     vec3 rectilinearRay = normalize(vec3(
-      normalized.x * aspect * halfFov,
-      normalized.y * halfFov,
+      screenPos.x * uVHalfTan,
+      screenPos.y * uVHalfTan,
       -1.0
     ));
 
-    // While zoomed out, use an equidistant fisheye ray. It makes the edges
-    // bend towards the centre like the inside of a sphere instead of merely
-    // shrinking a flat panorama. The projection blends continuously back to
-    // a normal rectilinear camera as the user zooms in.
-    float lensRadius = length(normalized);
-    float lensAngle = lensRadius * uFov * 0.5;
-    vec3 lensDirection = lensRadius > 0.0001
-      ? normalize(vec3(normalized.x * aspect, normalized.y, 0.0))
-      : vec3(0.0, 0.0, 0.0);
+    // Isotropic screen-space fisheye ray so zoomed-out panoramas curve
+    // spherically without oval distortion on portrait or landscape phones.
+    float lensRadius = length(screenPos);
+    float lensAngle = lensRadius * (uVFov * 0.5);
+    vec2 lensDirection = lensRadius > 0.0001
+      ? (screenPos / lensRadius)
+      : vec2(0.0, 0.0);
     vec3 fisheyeRay = vec3(
-      lensDirection.xy * sin(lensAngle),
+      lensDirection * sin(lensAngle),
       -cos(lensAngle)
     );
     vec3 ray = normalize(mix(rectilinearRay, fisheyeRay, uCurvature));
@@ -79,47 +90,62 @@ const PANORAMA_FRAGMENT_SHADER = `
 
     float longitude = atan(ray.x, -ray.z);
     float latitude = asin(clamp(ray.y, -1.0, 1.0));
-    float panoramaU = fract(0.5 + longitude / (2.0 * PI));
-    // Correct the vertical texture lookup: WebGL's V axis is the inverse of
-    // the image/canvas axis. This keeps sky at the top and ground at bottom.
-    float panoramaV = 0.5 + latitude / PI;
+
+    float panoramaU;
+    if (uWrapH > 0.5) {
+      panoramaU = fract(0.5 + longitude / (2.0 * PI));
+    } else {
+      panoramaU = 0.5 + longitude / max(uHSpan, 0.001);
+      if (panoramaU < 0.0 || panoramaU > 1.0) {
+        discard;
+      }
+    }
+
+    float panoramaV = 0.5 + (latitude - uPitchCenter) / max(uVSpan, 0.001);
+    if (panoramaV < 0.0 || panoramaV > 1.0) {
+      discard;
+    }
+
     gl_FragColor = texture2D(uTexture, vec2(panoramaU, panoramaV));
   }
 `;
 
 const IMAGE_FRAGMENT_SHADER = `
-  precision highp float;
+  ${PRECISION_HEADER}
   varying vec2 vUv;
   uniform sampler2D uTexture;
   uniform vec2 uDisplaySize;
   uniform vec2 uOffset;
 
   void main() {
-    // p is a screen coordinate centred at zero; positive Y points down.
     vec2 p = vec2(vUv.x - 0.5, 0.5 - vUv.y);
     vec2 imageUv = (p - uOffset) / uDisplaySize + 0.5;
     if (imageUv.x < 0.0 || imageUv.x > 1.0 || imageUv.y < 0.0 || imageUv.y > 1.0) {
       discard;
     }
 
-    // Convert canvas Y (top-origin) back to WebGL texture Y. This avoids
-    // rendering ordinary photos upside down alongside the panorama view.
     gl_FragColor = texture2D(uTexture, vec2(imageUv.x, 1.0 - imageUv.y));
   }
 `;
 
+type UniformName =
+  | 'resolution'
+  | 'vFov'
+  | 'vHalfTan'
+  | 'yaw'
+  | 'pitch'
+  | 'curvature'
+  | 'hSpan'
+  | 'vSpan'
+  | 'pitchCenter'
+  | 'wrapH'
+  | 'displaySize'
+  | 'offset';
+
 type ProgramUniforms = {
   position: number;
   texture: WebGLUniformLocation | null;
-  resolution?: WebGLUniformLocation | null;
-  fov?: WebGLUniformLocation | null;
-  yaw?: WebGLUniformLocation | null;
-  pitch?: WebGLUniformLocation | null;
-  frameScale?: WebGLUniformLocation | null;
-  curvature?: WebGLUniformLocation | null;
-  displaySize?: WebGLUniformLocation | null;
-  offset?: WebGLUniformLocation | null;
-};
+} & Partial<Record<UniformName, WebGLUniformLocation | null>>;
 
 function compileShader(gl: WebGLRenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
@@ -139,7 +165,7 @@ function compileShader(gl: WebGLRenderingContext, type: number, source: string):
 function createProgram(
   gl: WebGLRenderingContext,
   fragmentSource: string,
-  uniformNames: Array<'resolution' | 'fov' | 'yaw' | 'pitch' | 'frameScale' | 'curvature' | 'displaySize' | 'offset'>,
+  uniformNames: UniformName[],
 ): { program: WebGLProgram; uniforms: ProgramUniforms } {
   const vertexShader = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
   const fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -173,29 +199,41 @@ function createProgram(
   return { program, uniforms };
 }
 
+function getMaxTexelBudget(): number {
+  const memoryGb = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+  if (typeof memoryGb === 'number' && memoryGb > 0 && memoryGb <= 4) {
+    return LOW_MEMORY_MAX_TEXELS;
+  }
+  return HIGH_MEMORY_MAX_TEXELS;
+}
+
 /**
- * Lightweight WebGL renderer. Panoramas use a perspective raycaster into an
- * equirectangular texture (not a horizontal image scroller). Regular photos
- * use the same GPU texture with a contain/zoom camera so they can be explored
- * with the exact same gestures.
+ * Lightweight WebGL renderer supporting both full 360° equirectangular spheres,
+ * bounded partial mobile sweep panoramas, and flat photos. Recovers cleanly from
+ * mobile OS background context loss.
  */
 export class PanoramaRenderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly gl: WebGLRenderingContext;
-  private readonly buffer: WebGLBuffer;
-  private readonly panorama: { program: WebGLProgram; uniforms: ProgramUniforms };
-  private readonly image: { program: WebGLProgram; uniforms: ProgramUniforms };
+  private readonly onContextRestored?: () => void;
+  private buffer: WebGLBuffer | null = null;
+  private panorama: { program: WebGLProgram; uniforms: ProgramUniforms } | null = null;
+  private image: { program: WebGLProgram; uniforms: ProgramUniforms } | null = null;
   private texture: WebGLTexture | null = null;
-  private textureWidth = 1;
-  private textureHeight = 1;
-  private mode: ImageAsset['mode'] = 'image';
+  private currentAsset: ImageAsset | null = null;
+  private imageWidth = 1;
+  private imageHeight = 1;
   private viewport: ViewportSize = { width: 1, height: 1, dpr: 1 };
+  private contextLost = false;
   private destroyed = false;
 
   readonly maxTextureSize: number;
+  readonly maxTexels: number;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, onContextRestored?: () => void) {
     this.canvas = canvas;
+    this.onContextRestored = onContextRestored;
+
     const context = canvas.getContext('webgl', {
       alpha: true,
       antialias: false,
@@ -203,39 +241,85 @@ export class PanoramaRenderer {
       stencil: false,
       premultipliedAlpha: true,
       preserveDrawingBuffer: false,
-      desynchronized: true,
+      powerPreference: 'high-performance',
     });
     if (!context) {
       throw new Error('WebGL ist in diesem Browser nicht verfügbar.');
     }
     this.gl = context;
-    const reportedMax = Number(context.getParameter(context.MAX_TEXTURE_SIZE)) || 2048;
+    const reportedMax = Number(context.getParameter(context.MAX_TEXTURE_SIZE)) || 4096;
     this.maxTextureSize = Math.min(reportedMax, MAX_MOBILE_TEXTURE_DIMENSION);
+    this.maxTexels = getMaxTexelBudget();
 
+    this.initializeGpuResources();
+    this.canvas.addEventListener('webglcontextlost', this.handleContextLost, false);
+    this.canvas.addEventListener('webglcontextrestored', this.handleContextRestored, false);
+  }
+
+  private initializeGpuResources(): void {
+    const gl = this.gl;
     const vertices = new Float32Array([-1, -1, 3, -1, -1, 3]);
-    const buffer = context.createBuffer();
+    const buffer = gl.createBuffer();
     if (!buffer) {
       throw new Error('WebGL konnte keinen Zeichenpuffer erstellen.');
     }
     this.buffer = buffer;
-    context.bindBuffer(context.ARRAY_BUFFER, buffer);
-    context.bufferData(context.ARRAY_BUFFER, vertices, context.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
 
-    this.panorama = createProgram(context, PANORAMA_FRAGMENT_SHADER, [
+    this.panorama = createProgram(gl, PANORAMA_FRAGMENT_SHADER, [
       'resolution',
-      'fov',
+      'vFov',
+      'vHalfTan',
       'yaw',
       'pitch',
-      'frameScale',
       'curvature',
+      'hSpan',
+      'vSpan',
+      'pitchCenter',
+      'wrapH',
     ]);
-    this.image = createProgram(context, IMAGE_FRAGMENT_SHADER, ['displaySize', 'offset']);
+    this.image = createProgram(gl, IMAGE_FRAGMENT_SHADER, ['displaySize', 'offset']);
 
-    context.disable(context.DEPTH_TEST);
-    context.enable(context.BLEND);
-    context.blendFunc(context.SRC_ALPHA, context.ONE_MINUS_SRC_ALPHA);
-    context.clearColor(0, 0, 0, 0);
+    gl.disable(gl.DEPTH_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.clearColor(0, 0, 0, 0);
   }
+
+  private readonly handleContextLost = (event: Event): void => {
+    event.preventDefault();
+    this.contextLost = true;
+    this.texture = null;
+    this.buffer = null;
+    this.panorama = null;
+    this.image = null;
+  };
+
+  private readonly handleContextRestored = (): void => {
+    if (this.destroyed) return;
+    this.contextLost = false;
+    try {
+      this.initializeGpuResources();
+      this.resize(this.viewport);
+      const activeAsset = this.currentAsset;
+      if (activeAsset) {
+        void decodeImageFromUrl(activeAsset.url)
+          .then((decoded) => {
+            if (this.destroyed || this.currentAsset?.id !== activeAsset.id) {
+              decoded.src = '';
+              return;
+            }
+            this.uploadElementToTexture(decoded, activeAsset.width, activeAsset.height);
+            decoded.src = '';
+            this.onContextRestored?.();
+          })
+          .catch(() => undefined);
+      }
+    } catch {
+      // Context restoration failed; keep fallback state harmless.
+    }
+  };
 
   resize(viewport: ViewportSize): void {
     this.viewport = viewport;
@@ -245,75 +329,116 @@ export class PanoramaRenderer {
       this.canvas.width = pixelWidth;
       this.canvas.height = pixelHeight;
     }
-    this.gl.viewport(0, 0, pixelWidth, pixelHeight);
+    if (!this.contextLost) {
+      this.gl.viewport(0, 0, pixelWidth, pixelHeight);
+    }
+  }
+
+  private computeUploadDimensions(sourceWidth: number, sourceHeight: number): { width: number; height: number } {
+    const totalPixels = Math.max(1, sourceWidth * sourceHeight);
+    const scale = Math.min(
+      1,
+      this.maxTextureSize / Math.max(sourceWidth, 1),
+      this.maxTextureSize / Math.max(sourceHeight, 1),
+      Math.sqrt(this.maxTexels / totalPixels),
+    );
+    return {
+      width: Math.max(1, Math.round(sourceWidth * scale)),
+      height: Math.max(1, Math.round(sourceHeight * scale)),
+    };
+  }
+
+  private uploadElementToTexture(source: HTMLImageElement, naturalWidth: number, naturalHeight: number): void {
+    this.deleteTexture();
+    if (this.contextLost) return;
+
+    const { width, height } = this.computeUploadDimensions(naturalWidth, naturalHeight);
+
+    // Drawing through a 2D staging canvas guarantees EXIF orientation is applied
+    // consistently across iOS Safari WebKit and Android Chrome before texImage2D.
+    const stagingCanvas = document.createElement('canvas');
+    stagingCanvas.width = width;
+    stagingCanvas.height = height;
+    const stagingContext = stagingCanvas.getContext('2d', { alpha: true });
+    if (!stagingContext) {
+      stagingCanvas.width = 0;
+      stagingCanvas.height = 0;
+      throw new Error('Das Bild konnte für die GPU nicht vorbereitet werden.');
+    }
+    stagingContext.imageSmoothingEnabled = true;
+    stagingContext.imageSmoothingQuality = 'high';
+    stagingContext.drawImage(source, 0, 0, width, height);
+
+    const texture = this.gl.createTexture();
+    if (!texture) {
+      stagingCanvas.width = 0;
+      stagingCanvas.height = 0;
+      throw new Error('WebGL konnte keine Bildtextur erstellen.');
+    }
+
+    try {
+      this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+      this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, 1);
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
+      this.gl.texImage2D(
+        this.gl.TEXTURE_2D,
+        0,
+        this.gl.RGBA,
+        this.gl.RGBA,
+        this.gl.UNSIGNED_BYTE,
+        stagingCanvas,
+      );
+      this.gl.bindTexture(this.gl.TEXTURE_2D, null);
+    } finally {
+      // Zeroing dimensions immediately releases mobile Safari/Chrome backing RAM.
+      stagingCanvas.width = 0;
+      stagingCanvas.height = 0;
+    }
+
+    this.texture = texture;
   }
 
   setImage(asset: ImageAsset | null): void {
     this.deleteTexture();
+    this.currentAsset = asset;
     if (!asset) {
-      this.textureWidth = 1;
-      this.textureHeight = 1;
+      this.imageWidth = 1;
+      this.imageHeight = 1;
       return;
     }
 
-    const scale = Math.min(1, this.maxTextureSize / asset.width, this.maxTextureSize / asset.height);
-    const width = Math.max(1, Math.round(asset.width * scale));
-    const height = Math.max(1, Math.round(asset.height * scale));
-    let uploadSource: CanvasImageSource = asset.source;
-    let stagingCanvas: HTMLCanvasElement | null = null;
+    this.imageWidth = asset.width;
+    this.imageHeight = asset.height;
 
-    if (width !== asset.width || height !== asset.height) {
-      stagingCanvas = document.createElement('canvas');
-      stagingCanvas.width = width;
-      stagingCanvas.height = height;
-      const stagingContext = stagingCanvas.getContext('2d', { alpha: true });
-      if (!stagingContext) {
-        throw new Error('Das Bild konnte für die GPU nicht vorbereitet werden.');
-      }
-      stagingContext.imageSmoothingEnabled = true;
-      stagingContext.imageSmoothingQuality = 'high';
-      stagingContext.drawImage(asset.source, 0, 0, width, height);
-      uploadSource = stagingCanvas;
+    if (asset.source) {
+      this.uploadElementToTexture(asset.source, asset.width, asset.height);
+      releaseImageSource(asset);
+    } else {
+      void decodeImageFromUrl(asset.url)
+        .then((decoded) => {
+          if (this.destroyed || this.currentAsset?.id !== asset.id) {
+            decoded.src = '';
+            return;
+          }
+          this.uploadElementToTexture(decoded, asset.width, asset.height);
+          decoded.src = '';
+          this.onContextRestored?.();
+        })
+        .catch(() => undefined);
     }
-
-    const texture = this.gl.createTexture();
-    if (!texture) {
-      throw new Error('WebGL konnte keine Bildtextur erstellen.');
-    }
-
-    this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
-    this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, 1);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
-    this.gl.texImage2D(
-      this.gl.TEXTURE_2D,
-      0,
-      this.gl.RGBA,
-      this.gl.RGBA,
-      this.gl.UNSIGNED_BYTE,
-      uploadSource,
-    );
-    this.gl.bindTexture(this.gl.TEXTURE_2D, null);
-
-    // A staging canvas is only needed during texImage2D. Dropping the reference
-    // allows its backing store to be collected on large images.
-    stagingCanvas = null;
-    this.texture = texture;
-    this.textureWidth = width;
-    this.textureHeight = height;
-    this.mode = asset.mode;
   }
 
-  render(view: ViewState): void {
-    if (this.destroyed) return;
+  render(view: ViewState, mode: ViewerMode, coverage: PanoramaCoverage): void {
+    if (this.destroyed || this.contextLost || !this.buffer || !this.panorama || !this.image) return;
     const gl = this.gl;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clear(gl.COLOR_BUFFER_BIT);
     if (!this.texture) return;
 
-    const programData = this.mode === 'panorama' ? this.panorama : this.image;
+    const programData = mode === 'panorama' ? this.panorama : this.image;
     gl.useProgram(programData.program);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.enableVertexAttribArray(programData.uniforms.position);
@@ -322,27 +447,28 @@ export class PanoramaRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.uniform1i(programData.uniforms.texture, 0);
 
-    if (this.mode === 'panorama') {
+    if (mode === 'panorama') {
       const uniforms = programData.uniforms;
-      const fov = Math.min(2.45, Math.max(0.24, (Math.PI * 0.82) / Math.max(view.zoom, 0.05)));
+      const camera = computeCameraParams(this.viewport.width, this.viewport.height, view.zoom);
       gl.uniform2f(uniforms.resolution ?? null, this.viewport.width, this.viewport.height);
-      gl.uniform1f(uniforms.fov ?? null, fov);
+      gl.uniform1f(uniforms.vFov ?? null, camera.vFov);
+      gl.uniform1f(uniforms.vHalfTan ?? null, camera.vHalfTan);
       gl.uniform1f(uniforms.yaw ?? null, view.yaw);
       gl.uniform1f(uniforms.pitch ?? null, view.pitch);
-      // Keep the entire viewport active when zooming out; the camera changes
-      // its lens rather than turning into a smaller, flat rectangle.
-      gl.uniform1f(uniforms.frameScale ?? null, 1);
-      gl.uniform1f(uniforms.curvature ?? null, Math.min(1, Math.max(0, (1.08 - view.zoom) / 0.43)));
+      gl.uniform1f(uniforms.curvature ?? null, camera.curvature);
+      gl.uniform1f(uniforms.hSpan ?? null, coverage.horizontalSpan);
+      gl.uniform1f(uniforms.vSpan ?? null, coverage.verticalSpan);
+      gl.uniform1f(uniforms.pitchCenter ?? null, coverage.pitchCenter);
+      gl.uniform1f(uniforms.wrapH ?? null, coverage.wrapsHorizontally ? 1 : 0);
     } else {
-      const imageAspect = this.textureWidth / Math.max(this.textureHeight, 1);
-      const viewportAspect = this.viewport.width / Math.max(this.viewport.height, 1);
-      const baseWidth = imageAspect >= viewportAspect ? 1 : imageAspect / viewportAspect;
-      const baseHeight = imageAspect >= viewportAspect ? viewportAspect / imageAspect : 1;
-      gl.uniform2f(
-        programData.uniforms.displaySize ?? null,
-        baseWidth * view.zoom,
-        baseHeight * view.zoom,
+      const display = getNormalDisplaySize(
+        this.imageWidth,
+        this.imageHeight,
+        this.viewport.width,
+        this.viewport.height,
+        view.zoom,
       );
+      gl.uniform2f(programData.uniforms.displaySize ?? null, display.width, display.height);
       gl.uniform2f(programData.uniforms.offset ?? null, view.offsetX, view.offsetY);
     }
 
@@ -351,22 +477,31 @@ export class PanoramaRenderer {
   }
 
   disposeImage(): void {
+    this.currentAsset = null;
     this.deleteTexture();
   }
 
   dispose(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.canvas.removeEventListener('webglcontextlost', this.handleContextLost, false);
+    this.canvas.removeEventListener('webglcontextrestored', this.handleContextRestored, false);
+    this.currentAsset = null;
     this.deleteTexture();
-    this.gl.deleteBuffer(this.buffer);
-    this.gl.deleteProgram(this.panorama.program);
-    this.gl.deleteProgram(this.image.program);
+    if (!this.contextLost) {
+      if (this.buffer) this.gl.deleteBuffer(this.buffer);
+      if (this.panorama) this.gl.deleteProgram(this.panorama.program);
+      if (this.image) this.gl.deleteProgram(this.image.program);
+    }
+    this.buffer = null;
+    this.panorama = null;
+    this.image = null;
   }
 
   private deleteTexture(): void {
-    if (this.texture) {
+    if (this.texture && !this.contextLost) {
       this.gl.deleteTexture(this.texture);
-      this.texture = null;
     }
+    this.texture = null;
   }
 }

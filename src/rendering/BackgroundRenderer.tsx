@@ -1,49 +1,53 @@
 import { forwardRef, useImperativeHandle, useRef } from 'react';
-import type { ImageAsset, ViewState } from '../types';
+import type { ImageAsset, ViewerMode, ViewState } from '../types';
 
 export interface BackgroundRendererHandle {
-  update(view: ViewState, asset: ImageAsset, width: number, height: number): void;
+  update(view: ViewState, mode: ViewerMode, width: number, height: number): void;
 }
 
 interface BackgroundRendererProps {
   asset: ImageAsset;
 }
 
-/** CSS compositor layer behind the transparent WebGL canvas. */
+/**
+ * Lightweight CSS compositor backdrop behind the transparent WebGL canvas.
+ * Uses a tiny pre-downscaled thumbnail and mutates only GPU-composited
+ * transform/opacity properties so mobile devices never re-blur full-res photos.
+ */
 export const BackgroundRenderer = forwardRef<BackgroundRendererHandle, BackgroundRendererProps>(
   function BackgroundRenderer({ asset }, ref) {
-    const layerRef = useRef<HTMLDivElement>(null);
+    const imageRef = useRef<HTMLImageElement>(null);
+    const shadeRef = useRef<HTMLDivElement>(null);
 
     useImperativeHandle(
       ref,
       () => ({
-        update(view, currentAsset, width, height) {
-          const layer = layerRef.current;
-          if (!layer || currentAsset.id !== asset.id) return;
+        update(view, mode, width, height) {
+          const image = imageRef.current;
+          const shade = shadeRef.current;
+          if (!image || !shade) return;
 
-          const horizontalShift = currentAsset.mode === 'panorama'
-            ? (view.yaw / (Math.PI * 2)) * width * 0.26
-            : view.offsetX * width * 0.22;
-          const verticalShift = currentAsset.mode === 'panorama'
-            ? (view.pitch / (Math.PI * 2)) * height * 0.2
-            : view.offsetY * height * 0.22;
-          const zoomScale = currentAsset.mode === 'panorama'
-            ? 1.08 + Math.max(0, view.zoom - 1) * 0.015
-            : 1.08 + Math.max(0, view.zoom - 1) * 0.04;
+          const horizontalShift = mode === 'panorama'
+            ? Math.sin(view.yaw) * width * 0.08
+            : view.offsetX * width * 0.18;
+          const verticalShift = mode === 'panorama'
+            ? (view.pitch / Math.PI) * height * 0.14
+            : view.offsetY * height * 0.18;
+          const zoomScale = mode === 'panorama'
+            ? 1.12 + Math.max(0, view.zoom - 1) * 0.015
+            : 1.12 + Math.max(0, view.zoom - 1) * 0.035;
 
-          layer.style.setProperty('--background-shift-x', `${horizontalShift}px`);
-          layer.style.setProperty('--background-shift-y', `${verticalShift}px`);
-          layer.style.setProperty('--background-scale', String(zoomScale));
-          layer.style.setProperty('--background-brightness', view.zoom < 0.9 ? '0.76' : '0.62');
+          image.style.transform = `translate3d(${horizontalShift.toFixed(1)}px, ${verticalShift.toFixed(1)}px, 0) scale(${zoomScale.toFixed(3)})`;
+          shade.style.opacity = view.zoom < 0.92 ? '0.68' : '0.88';
         },
       }),
-      [asset],
+      [],
     );
 
     return (
-      <div ref={layerRef} className="viewer-background" aria-hidden="true">
-        <img src={asset.url} alt="" draggable={false} />
-        <div className="viewer-background__shade" />
+      <div className="viewer-background" aria-hidden="true">
+        <img ref={imageRef} src={asset.backgroundUrl} alt="" draggable={false} />
+        <div ref={shadeRef} className="viewer-background__shade" />
       </div>
     );
   },

@@ -1,5 +1,5 @@
 /* Panorama Viewer service worker. Kept as plain JS so Vite can copy it without a plugin. */
-const CACHE_NAME = 'panorama-viewer-shell-v2';
+const CACHE_NAME = 'panorama-viewer-shell-v3';
 const DATABASE_NAME = 'panorama-viewer';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'incoming-shares';
@@ -95,15 +95,15 @@ async function cacheFirst(request) {
 }
 
 async function navigationResponse(request) {
+  const root = appRoot();
   try {
     const response = await fetch(request);
     if (response.ok) {
       const cache = await caches.open(CACHE_NAME);
-      cache.put(request, response.clone());
+      cache.put(root, response.clone());
     }
     return response;
   } catch {
-    const root = appRoot();
     return (await caches.match(request)) || (await caches.match(root));
   }
 }

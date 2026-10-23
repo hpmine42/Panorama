@@ -1,9 +1,29 @@
-import { useEffect, useRef, useState } from 'react';
-import type { ImageAsset, ViewState, ViewportSize } from '../types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  ImageAsset,
+  PanoramaCoverage,
+  ProjectionMode,
+  ViewerMode,
+  ViewState,
+  ViewportSize,
+} from '../types';
 import { DEFAULT_VIEW } from '../types';
 import { GestureController } from '../gestures/GestureController';
+import { GyroController, isGyroSupported, requestGyroPermission } from '../gestures/GyroController';
 import { BackgroundRenderer, type BackgroundRendererHandle } from '../rendering/BackgroundRenderer';
+import {
+  applyNormalZoomAround,
+  applyPanoramaPan,
+  applyPanoramaZoomAround,
+  clamp,
+  clampNormalOffsets,
+  clampPanoramaView,
+  MAX_ZOOM,
+  MIN_NORMAL_ZOOM,
+  MIN_PANORAMA_ZOOM,
+} from '../rendering/panoramaMath';
 import { PanoramaRenderer } from '../rendering/PanoramaRenderer';
+import { getCoverageForProjectionMode } from '../utils/panoramaMetadata';
 import { Icon } from './Icon';
 import { ViewerControls } from './ViewerControls';
 
@@ -22,14 +42,14 @@ type ZoomAnimation = {
   startedAt: number;
 };
 
-const MIN_NORMAL_ZOOM = 0.55;
-const MAX_ZOOM = 5;
-const MIN_PANORAMA_ZOOM = 0.65;
-const MAX_PITCH = 1.34;
+type WebkitFullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
+type WebkitFullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
 
 function easeOutCubic(value: number): number {
   return 1 - (1 - value) ** 3;
@@ -39,105 +59,120 @@ function cloneView(view: ViewState): ViewState {
   return { ...view };
 }
 
+function getAvailableModes(asset: ImageAsset): ProjectionMode[] {
+  const aspect = asset.width / Math.max(asset.height, 1);
+  if (asset.coverage.wrapsHorizontally) {
+    return ['panorama', 'image'];
+  }
+  if (asset.mode === 'panorama') {
+    return ['panorama', 'panorama360', 'image'];
+  }
+  if (aspect >= 1.45) {
+    return ['image', 'panorama'];
+  }
+  return ['image'];
+}
+
+function toViewerMode(projectionMode: ProjectionMode): ViewerMode {
+  return projectionMode === 'image' ? 'image' : 'panorama';
+}
+
 export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const backgroundRef = useRef<BackgroundRendererHandle>(null);
   const rendererRef = useRef<PanoramaRenderer | null>(null);
   const gestureRef = useRef<GestureController | null>(null);
+  const gyroRef = useRef<GyroController | null>(null);
   const assetRef = useRef(asset);
+  const projectionModeRef = useRef<ProjectionMode>(asset.mode === 'panorama' ? 'panorama' : 'image');
   const viewRef = useRef<ViewState>(cloneView(DEFAULT_VIEW));
   const sizeRef = useRef<ViewportSize>({ width: 1, height: 1, dpr: 1 });
   const animationFrameRef = useRef<number | null>(null);
   const lastFrameTimeRef = useRef<number | null>(null);
   const inertiaRef = useRef<Inertia>({ x: 0, y: 0 });
   const zoomAnimationRef = useRef<ZoomAnimation | null>(null);
+
+  const [projectionMode, setProjectionMode] = useState<ProjectionMode>(
+    asset.mode === 'panorama' ? 'panorama' : 'image',
+  );
+  const [controlsHidden, setControlsHidden] = useState(false);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const [gyroActive, setGyroActive] = useState(false);
   const [rendererError, setRendererError] = useState<string | null>(null);
 
-  assetRef.current = asset;
-
-  const getNormalDisplaySize = (zoom: number): { width: number; height: number } => {
-    const currentAsset = assetRef.current;
-    const viewport = sizeRef.current;
-    const imageAspect = currentAsset.width / Math.max(currentAsset.height, 1);
-    const viewportAspect = viewport.width / Math.max(viewport.height, 1);
-    const baseWidth = imageAspect >= viewportAspect ? 1 : imageAspect / viewportAspect;
-    const baseHeight = imageAspect >= viewportAspect ? viewportAspect / imageAspect : 1;
-    return { width: baseWidth * zoom, height: baseHeight * zoom };
-  };
-
-  const clampNormalOffsets = (view: ViewState): void => {
-    const display = getNormalDisplaySize(view.zoom);
-    const maxOffsetX = Math.max(0, (display.width - 1) / 2);
-    const maxOffsetY = Math.max(0, (display.height - 1) / 2);
-    view.offsetX = clamp(view.offsetX, -maxOffsetX, maxOffsetX);
-    view.offsetY = clamp(view.offsetY, -maxOffsetY, maxOffsetY);
-  };
-
-  const panoramaFov = (zoom: number): number => (
-    clamp((Math.PI * 0.82) / Math.max(zoom, 0.05), 0.24, 2.45)
+  const gyroAvailable = useMemo(() => isGyroSupported(), []);
+  const availableModes = useMemo(() => getAvailableModes(asset), [asset]);
+  const activeCoverage = useMemo(
+    () => getCoverageForProjectionMode(asset.width, asset.height, asset.coverage, projectionMode),
+    [asset, projectionMode],
   );
 
+  assetRef.current = asset;
+  projectionModeRef.current = projectionMode;
+
+  const getCurrentCoverage = (): PanoramaCoverage => {
+    const current = assetRef.current;
+    return getCoverageForProjectionMode(
+      current.width,
+      current.height,
+      current.coverage,
+      projectionModeRef.current,
+    );
+  };
+
+  const clampActiveView = (view: ViewState): void => {
+    const current = assetRef.current;
+    const { width, height } = sizeRef.current;
+    if (toViewerMode(projectionModeRef.current) === 'panorama') {
+      clampPanoramaView(view, getCurrentCoverage(), width, height);
+    } else {
+      clampNormalOffsets(view, current.width, current.height, width, height);
+    }
+  };
+
   const applyPan = (deltaX: number, deltaY: number): void => {
-    const currentAsset = assetRef.current;
+    const current = assetRef.current;
     const view = viewRef.current;
     const { width, height } = sizeRef.current;
     if (width <= 1 || height <= 1) return;
 
-    if (currentAsset.mode === 'panorama') {
-      const fov = panoramaFov(view.zoom);
-      // Negative X follows a leftward finger movement: the sampled panorama
-      // moves left, while the camera rotates naturally through the scene.
-      view.yaw -= (deltaX / width) * fov * 1.08;
-      view.pitch += (deltaY / height) * fov * 0.78;
-      view.pitch = clamp(view.pitch, -MAX_PITCH, MAX_PITCH);
-      if (view.yaw > Math.PI || view.yaw < -Math.PI) {
-        view.yaw = ((view.yaw + Math.PI) % (Math.PI * 2)) - Math.PI;
-      }
+    if (toViewerMode(projectionModeRef.current) === 'panorama') {
+      applyPanoramaPan(view, deltaX, deltaY, width, height, getCurrentCoverage());
     } else {
       view.offsetX += deltaX / width;
       view.offsetY += deltaY / height;
-      clampNormalOffsets(view);
+      clampNormalOffsets(view, current.width, current.height, width, height);
     }
   };
 
   const applyZoomAround = (nextZoom: number, anchorX: number, anchorY: number): void => {
-    const currentAsset = assetRef.current;
+    const current = assetRef.current;
     const view = viewRef.current;
     const { width, height } = sizeRef.current;
-    const minimum = currentAsset.mode === 'panorama' ? MIN_PANORAMA_ZOOM : MIN_NORMAL_ZOOM;
-    const targetZoom = clamp(nextZoom, minimum, MAX_ZOOM);
-    const oldZoom = view.zoom;
 
-    if (currentAsset.mode === 'panorama') {
-      const aspect = width / Math.max(height, 1);
-      const oldFov = panoramaFov(oldZoom);
-      const nextFov = panoramaFov(targetZoom);
-      const screenX = (anchorX / Math.max(width, 1) - 0.5) * 2;
-      const screenUp = (0.5 - anchorY / Math.max(height, 1)) * 2;
-      const oldHorizontalAngle = Math.atan(screenX * aspect * Math.tan(oldFov / 2));
-      const nextHorizontalAngle = Math.atan(screenX * aspect * Math.tan(nextFov / 2));
-      const oldVerticalAngle = Math.atan(screenUp * Math.tan(oldFov / 2));
-      const nextVerticalAngle = Math.atan(screenUp * Math.tan(nextFov / 2));
-      // Preserve the ray beneath the pinch centre while the field of view
-      // changes. This is the same anchor correction used by a camera lens.
-      view.yaw += oldHorizontalAngle - nextHorizontalAngle;
-      view.pitch += oldVerticalAngle - nextVerticalAngle;
-      view.pitch = clamp(view.pitch, -MAX_PITCH, MAX_PITCH);
-      view.zoom = targetZoom;
-      return;
+    if (toViewerMode(projectionModeRef.current) === 'panorama') {
+      applyPanoramaZoomAround(
+        view,
+        nextZoom,
+        anchorX,
+        anchorY,
+        width,
+        height,
+        getCurrentCoverage(),
+      );
+    } else {
+      applyNormalZoomAround(
+        view,
+        nextZoom,
+        anchorX,
+        anchorY,
+        current.width,
+        current.height,
+        width,
+        height,
+      );
     }
-
-    const oldDisplay = getNormalDisplaySize(oldZoom);
-    const nextDisplay = getNormalDisplaySize(targetZoom);
-    const pointX = anchorX / Math.max(width, 1) - 0.5;
-    const pointY = anchorY / Math.max(height, 1) - 0.5;
-    const ratioX = nextDisplay.width / Math.max(oldDisplay.width, 0.0001);
-    const ratioY = nextDisplay.height / Math.max(oldDisplay.height, 0.0001);
-    view.offsetX = pointX - (pointX - view.offsetX) * ratioX;
-    view.offsetY = pointY - (pointY - view.offsetY) * ratioY;
-    view.zoom = targetZoom;
-    clampNormalOffsets(view);
   };
 
   const scheduleFrame = (): void => {
@@ -166,7 +201,7 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
 
     const zoomAnimation = zoomAnimationRef.current;
     if (zoomAnimation) {
-      const progress = clamp((timestamp - zoomAnimation.startedAt) / 280, 0, 1);
+      const progress = clamp((timestamp - zoomAnimation.startedAt) / 260, 0, 1);
       const eased = easeOutCubic(progress);
       viewRef.current = cloneView(zoomAnimation.start);
       applyZoomAround(
@@ -181,11 +216,12 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
       }
     }
 
-    const currentAsset = assetRef.current;
-    rendererRef.current?.render(viewRef.current);
+    const mode = toViewerMode(projectionModeRef.current);
+    const coverage = getCurrentCoverage();
+    rendererRef.current?.render(viewRef.current, mode, coverage);
     backgroundRef.current?.update(
       viewRef.current,
-      currentAsset,
+      mode,
       sizeRef.current.width,
       sizeRef.current.height,
     );
@@ -213,16 +249,62 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
     inertiaRef.current = { x: 0, y: 0 };
     zoomAnimationRef.current = null;
     viewRef.current = cloneView(DEFAULT_VIEW);
+    clampActiveView(viewRef.current);
+    gyroRef.current?.resetBaseline();
     scheduleFrame();
   };
 
   const zoomIn = (): void => {
-    startZoomAnimation(Math.min(MAX_ZOOM, viewRef.current.zoom * 1.35));
+    startZoomAnimation(Math.min(MAX_ZOOM, viewRef.current.zoom * 1.38));
   };
 
   const zoomOut = (): void => {
-    const minimum = assetRef.current.mode === 'panorama' ? MIN_PANORAMA_ZOOM : MIN_NORMAL_ZOOM;
-    startZoomAnimation(Math.max(minimum, viewRef.current.zoom / 1.35));
+    const minimum = toViewerMode(projectionModeRef.current) === 'panorama'
+      ? MIN_PANORAMA_ZOOM
+      : MIN_NORMAL_ZOOM;
+    startZoomAnimation(Math.max(minimum, viewRef.current.zoom / 1.38));
+  };
+
+  const cycleMode = (): void => {
+    if (availableModes.length <= 1) return;
+    const currentIndex = availableModes.indexOf(projectionModeRef.current);
+    const nextMode = availableModes[(currentIndex + 1) % availableModes.length];
+    projectionModeRef.current = nextMode;
+    setProjectionMode(nextMode);
+    if (nextMode === 'image' && gyroRef.current) {
+      gyroRef.current.stop();
+      setGyroActive(false);
+    }
+    inertiaRef.current = { x: 0, y: 0 };
+    zoomAnimationRef.current = null;
+    viewRef.current = cloneView(DEFAULT_VIEW);
+    clampActiveView(viewRef.current);
+    scheduleFrame();
+  };
+
+  const toggleGyro = async (): Promise<void> => {
+    if (!gyroAvailable) return;
+    if (gyroActive) {
+      gyroRef.current?.stop();
+      setGyroActive(false);
+      return;
+    }
+    const granted = await requestGyroPermission();
+    if (!granted) return;
+
+    if (!gyroRef.current) {
+      gyroRef.current = new GyroController((deltaYaw, deltaPitch) => {
+        if (toViewerMode(projectionModeRef.current) !== 'panorama') return;
+        const view = viewRef.current;
+        const { width, height } = sizeRef.current;
+        view.yaw += deltaYaw;
+        view.pitch += deltaPitch;
+        clampPanoramaView(view, getCurrentCoverage(), width, height);
+        scheduleFrame();
+      });
+    }
+    gyroRef.current.start();
+    setGyroActive(true);
   };
 
   useEffect(() => {
@@ -232,13 +314,16 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
 
     let renderer: PanoramaRenderer;
     try {
-      renderer = new PanoramaRenderer(canvas);
+      renderer = new PanoramaRenderer(canvas, () => {
+        scheduleFrame();
+      });
       rendererRef.current = renderer;
     } catch (error) {
       setRendererError(error instanceof Error ? error.message : 'WebGL konnte nicht gestartet werden.');
       return undefined;
     }
 
+    let orientationRaf: number | null = null;
     const updateSize = (): void => {
       const rect = stage.getBoundingClientRect();
       const nextSize: ViewportSize = {
@@ -248,12 +333,23 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
       };
       sizeRef.current = nextSize;
       renderer.resize(nextSize);
-      clampNormalOffsets(viewRef.current);
+      clampActiveView(viewRef.current);
       scheduleFrame();
+    };
+
+    const handleOrientationOrViewport = (): void => {
+      updateSize();
+      if (orientationRaf !== null) cancelAnimationFrame(orientationRaf);
+      orientationRaf = requestAnimationFrame(() => {
+        orientationRaf = null;
+        updateSize();
+      });
     };
 
     const observer = new ResizeObserver(updateSize);
     observer.observe(stage);
+    window.visualViewport?.addEventListener('resize', handleOrientationOrViewport);
+    window.addEventListener('orientationchange', handleOrientationOrViewport);
     updateSize();
 
     gestureRef.current = new GestureController(canvas, {
@@ -273,15 +369,20 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
         inertiaRef.current = { x: 0, y: 0 };
         zoomAnimationRef.current = null;
         applyPan(deltaX, deltaY);
-        applyZoomAround(viewRef.current.zoom * clamp(scale, 0.75, 1.33), centerX, centerY);
+        applyZoomAround(viewRef.current.zoom * clamp(scale, 0.72, 1.38), centerX, centerY);
         scheduleFrame();
       },
       onPinchEnd() {
         inertiaRef.current = { x: 0, y: 0 };
+        gyroRef.current?.resetBaseline();
       },
       onDoubleTap(x, y) {
-        const target = viewRef.current.zoom > 1.15 ? 1 : assetRef.current.mode === 'panorama' ? 2 : 2.25;
+        const isPanorama = toViewerMode(projectionModeRef.current) === 'panorama';
+        const target = Math.abs(viewRef.current.zoom - 1) > 0.15 ? 1 : isPanorama ? 2.1 : 2.4;
         startZoomAnimation(target, x, y);
+      },
+      onSingleTap() {
+        setControlsHidden((previous) => !previous);
       },
       onWheel(deltaY, x, y) {
         const factor = Math.exp(-deltaY * 0.0012);
@@ -290,45 +391,88 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
       },
     });
 
+    const syncFullscreenState = (): void => {
+      const doc = document as WebkitFullscreenDocument;
+      const active = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+      setNativeFullscreen(active);
+      handleOrientationOrViewport();
+    };
+    document.addEventListener('fullscreenchange', syncFullscreenState);
+    document.addEventListener('webkitfullscreenchange', syncFullscreenState);
+
     return () => {
       observer.disconnect();
+      window.visualViewport?.removeEventListener('resize', handleOrientationOrViewport);
+      window.removeEventListener('orientationchange', handleOrientationOrViewport);
+      document.removeEventListener('fullscreenchange', syncFullscreenState);
+      document.removeEventListener('webkitfullscreenchange', syncFullscreenState);
+      if (orientationRaf !== null) cancelAnimationFrame(orientationRaf);
       gestureRef.current?.destroy();
       gestureRef.current = null;
+      gyroRef.current?.stop();
+      gyroRef.current = null;
       if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
       renderer.dispose();
       rendererRef.current = null;
     };
-    // This viewer instance is intentionally tied to the canvas lifecycle.
-    // Asset changes are handled by the effect below without rebuilding WebGL.
+    // Tied to canvas mount lifecycle; asset changes are applied in the effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    const initialMode: ProjectionMode = asset.mode === 'panorama' ? 'panorama' : 'image';
     assetRef.current = asset;
+    projectionModeRef.current = initialMode;
+    setProjectionMode(initialMode);
+    setControlsHidden(false);
+    if (initialMode === 'image' && gyroRef.current) {
+      gyroRef.current.stop();
+      setGyroActive(false);
+    }
+
     viewRef.current = cloneView(DEFAULT_VIEW);
     inertiaRef.current = { x: 0, y: 0 };
     zoomAnimationRef.current = null;
+
     try {
       rendererRef.current?.setImage(asset);
       setRendererError(null);
     } catch (error) {
       setRendererError(error instanceof Error ? error.message : 'Bild konnte nicht auf die GPU geladen werden.');
     }
+    clampActiveView(viewRef.current);
     scheduleFrame();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset]);
 
   const toggleFullscreen = async (): Promise<void> => {
+    const doc = document as WebkitFullscreenDocument;
+    const stage = stageRef.current as WebkitFullscreenElement | null;
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      } else if (stageRef.current?.requestFullscreen) {
-        await stageRef.current.requestFullscreen();
+      if (doc.fullscreenElement) {
+        await doc.exitFullscreen();
+        return;
+      }
+      if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        await doc.webkitExitFullscreen();
+        return;
+      }
+      if (stage?.requestFullscreen) {
+        await stage.requestFullscreen();
+        return;
+      }
+      if (stage?.webkitRequestFullscreen) {
+        await stage.webkitRequestFullscreen();
+        return;
       }
     } catch {
-      // Fullscreen is optional and can be denied by an embedding browser.
+      // Fall back to immersive HUD-free mode when fullscreen is denied or unsupported.
     }
+    setControlsHidden((previous) => !previous);
   };
+
+  const effectiveFullscreen = nativeFullscreen || controlsHidden;
 
   return (
     <section
@@ -347,16 +491,27 @@ export function PanoramaViewer({ asset, onClose, onOpenAnother }: PanoramaViewer
         />
       )}
       <canvas ref={canvasRef} className="viewer-canvas" aria-label="Interaktives Foto" />
-      <div className="viewer-vignette" aria-hidden="true" />
+      <div
+        className={`viewer-vignette${controlsHidden ? ' viewer-vignette--hidden' : ''}`}
+        aria-hidden="true"
+      />
       <ViewerControls
         name={asset.name}
-        mode={asset.mode}
+        projectionMode={projectionMode}
+        availableModes={availableModes}
+        coverage={activeCoverage}
+        hidden={controlsHidden}
+        isFullscreen={effectiveFullscreen}
+        gyroAvailable={gyroAvailable}
+        gyroActive={gyroActive}
         onClose={onClose}
         onOpenAnother={onOpenAnother}
+        onCycleMode={cycleMode}
+        onToggleGyro={() => void toggleGyro()}
         onZoomOut={zoomOut}
         onZoomIn={zoomIn}
         onReset={resetView}
-        onFullscreen={toggleFullscreen}
+        onFullscreen={() => void toggleFullscreen()}
       />
       {rendererError && (
         <div className="viewer-error" role="alert">

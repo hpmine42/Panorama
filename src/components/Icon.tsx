@@ -3,6 +3,8 @@ import type { ReactNode, SVGProps } from 'react';
 export type IconName =
   | 'arrow-left'
   | 'chevron-down'
+  | 'compass'
+  | 'compress'
   | 'expand'
   | 'image'
   | 'minus'
@@ -33,6 +35,28 @@ export function Icon({ name, size = 20, ...props }: IconProps) {
       break;
     case 'chevron-down':
       content = <path d="m6 9 6 6 6-6" />;
+      break;
+    case 'compass':
+      content = (
+        <>
+          <circle cx="12" cy="12" r="9" />
+          <polygon points="15.8 8.2 13.4 13.4 8.2 15.8 10.6 10.6 15.8 8.2" />
+        </>
+      );
+      break;
+    case 'compress':
+      content = (
+        <>
+          <path d="M8 3v5H3" />
+          <path d="M3 3l5 5" />
+          <path d="M16 3v5h5" />
+          <path d="m21 3-5 5" />
+          <path d="M8 21v-5H3" />
+          <path d="m3 21 5-5" />
+          <path d="M16 21v-5h5" />
+          <path d="m21 21-5-5" />
+        </>
+      );
       break;
     case 'expand':
       content = <><path d="M8 3H3v5" /><path d="M3 3l6 6" /><path d="M16 3h5v5" /><path d="m21 3-6 6" /><path d="M8 21H3v-5" /><path d="m3 21 6-6" /><path d="M16 21h5v-5" /><path d="m21 21-6-6" /></>;

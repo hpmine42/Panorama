@@ -6,22 +6,23 @@ Die Anwendung verarbeitet Bilder standardmäßig vollständig im Browser. Es gib
 
 ## Features
 
-- WebGL-GPU-Rendering für equirectangulare Panoramen, ohne Three.js
-- Automatische Erkennung sehr breiter Bilder ab einem Seitenverhältnis von ungefähr 1,75:1
-- Öffnen über Dateiauswahl, Galerie bzw. Android-Teilen-Menü
+- WebGL-GPU-Rendering für 360°-Panoramen und Smartphone-Schwenkpanoramen, ohne Three.js
+- Auslesen eingebetteter `GPano`-XMP-Metadaten (z. B. Google Kamera / Pixel) sowie verzerrungsfreie 1:1-Proportionen für Teil-Panoramen
+- Automatische Erkennung von 360°-Panoramen (~2:1) und breiten Schwenkpanoramen (ab ca. 1,94:1), plus direkter Modus-Umschalter (`Pano` / `360°` / `Foto`)
+- Öffnen über nativen Android/iOS-Fotopicker, Galerie bzw. Android-Teilen-Menü
 - JPG, JPEG, PNG, WEBP sowie HEIC/HEIF, soweit der jeweilige Browser dekodieren kann
-- 1-Finger-Navigation mit direkter Bewegungsrichtung:
+- Orientierungsinvariantes Diagonal-FOV für Hoch- und Querformat ohne vertikale Randverzerrung
+- 1-Finger-Navigation mit direkter 1:1-Fingerführung:
   - nach links wischen bewegt den sichtbaren Bildinhalt nach links
   - nach rechts wischen bewegt ihn nach rechts
-  - vertikale Gesten bewegen die Ansicht leicht nach oben oder unten
-- Pointer Events mit `touch-action: none`, `requestAnimationFrame` und natürlicher Trägheit
-- Pinch-to-Zoom mit Ankerkorrektur unter dem Finger
-- Doppeltippen, Plus/Minus-Schaltflächen und Mausrad-Zoom auf Desktop
-- Zoom-out unter die Bildschirmgröße bei normalen Fotos mit dynamischem Foto-Hintergrund
-- Derselbe stark vergrößerte, weichgezeichnete und abgedunkelte Bildinhalt als Hintergrund
-- Zurücksetzen, Vollbild und Bildwechsel ohne unnötige Panels
-- Responsive für Hochformat, Querformat, Resize und Orientation Change
-- Speicherbewusste GPU-Texturen: sehr große Quellen werden vor dem Upload auf bis zu 4096 Pixel Kantenlänge reduziert
+  - vertikale Gesten bewegen die Ansicht nach oben oder unten
+- Gehärtete Pointer-Gesten mit `touch-action: none`, `lostpointercapture`-Bereinigung, Schutz vor Nach-Pinch-Sprung und natürlicher Trägheit
+- Exakter 3D-Pinch-to-Zoom mit Ankerpunkt unter den Fingern sowie isotroper Fisheye-Übergang beim Herauszoomen
+- Doppeltippen (Zoom), Einfachtippen (Bedienelemente ein-/ausblenden), Plus/Minus-Schaltflächen und Mausrad-Zoom
+- Optionale Gyroskop-/Bewegungssteuerung auf Mobilgeräten ohne Gimbal-Lock am Horizont
+- Leichtgewichtiger, vorverkleinerter Blur-Hintergrund ohne doppelte Vollbild-Speicherbelegung
+- Responsive für Hochformat, Querformat, Safe-Area-Ränder (inkl. Kamera-Cutout/Notch), Dynamic Viewport und `webglcontextlost`-Wiederherstellung
+- Speicherbewusste GPU-Texturen bis 8192 Pixel Kantenlänge (abhängig von GPU-Limit und Gerätespeicher) inklusive EXIF-Orientierung
 - Vollständige PWA mit Manifest, Offline-App-Shell, Icons und Service Worker
 - Web Share Target für Bilddateien aus Apps wie Google Fotos
 - Keine automatische Speicherung auf einem Server
@@ -55,10 +56,11 @@ npm run dev
 
 Vite zeigt anschließend die lokale URL an, üblicherweise `http://localhost:5173/`. Für Tests auf einem anderen Gerät im selben Netzwerk kann Vite über die konfigurierte Adresse erreichbar gemacht werden; das Gerät muss den Entwicklungsrechner erreichen können. PWA-Funktionen sind im Development-Modus absichtlich nicht registriert, damit kein alter Service-Worker den Entwicklungsstand cached.
 
-Typprüfung und Production-Build:
+Typprüfung, Tests und Production-Build:
 
 ```bash
 npm run typecheck
+npm test
 npm run build
 ```
 
@@ -165,7 +167,7 @@ Wichtige Einschränkungen:
 - Web Share Target ist vor allem für installierte Chromium-PWAs auf Android verfügbar. iOS Safari bietet diesen Android-Share-Target-Weg nicht in gleicher Form.
 - Google Fotos und Android können ein Bildformat oder eine sehr große Datei vor dem Teilen bereits konvertieren oder die Datei nicht an eine Web-App weitergeben.
 - Equirectangulare 360°-Panoramen funktionieren am besten im üblichen 2:1-Format. Breite Nicht-Panoramen werden heuristisch als Panorama erkannt; die Ansicht kann über **Zurücksetzen** neu initialisiert werden.
-- Sehr große Bilder werden für die GPU auf bis zu 4096 Pixel pro Kante reduziert. Das schützt den Arbeitsspeicher und die GPU, kann aber gegenüber dem Original eine geringere Detailauflösung bedeuten.
+- Sehr große Bilder werden speicherbewusst auf bis zu 8192 Pixel Kantenlänge (bzw. das GPU-/Speicherbudget des Geräts) skaliert. Das schützt den Arbeitsspeicher und die GPU bei gleichzeitig hoher Detailauflösung.
 - Vollbild ist eine Browser- und Installationsfunktion. Browser-UI, Systemleisten und Hersteller-Sicherheitsregeln können nicht von einer Web-App entfernt werden.
 - Ein Service Worker benötigt HTTPS (Ausnahme: `localhost` für Entwicklung). Private-Browsing-Modi können Installation, Cache und IndexedDB einschränken.
 
